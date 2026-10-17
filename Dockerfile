@@ -15,4 +15,4 @@ RUN npm ci --omit=dev
 COPY --from=builder /app/dist ./dist
 EXPOSE 3000
 ENTRYPOINT ["node", "dist/index.js"]
-CMD ["--transport", "sse", "--port", "3000"]
+CMD ["--transport", "streamable-http", "--port", "3000"]
