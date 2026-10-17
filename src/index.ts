@@ -31,6 +31,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -810,24 +811,30 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
-// CLI arguments
-// ---------------------------------------------------------------------------
 
-function parseArgs(): { transport: "stdio" | "sse"; port: number } {
-  let transport: "stdio" | "sse" = "stdio";
+ // ---------------------------------------------------------------------------
+ // CLI arguments
+ // ---------------------------------------------------------------------------
+
+function parseArgs(): { transport: "stdio" | "streamable-http"; port: number } {
+  let transport: "stdio" | "streamable-http" = "stdio";
   let port = 3000;
 
   for (let i = 2; i < process.argv.length; i++) {
     if (process.argv[i] === "--transport" && process.argv[i + 1]) {
       const v = process.argv[i + 1];
-      if (v === "stdio" || v === "sse") transport = v;
+      if (v === "stdio" || v === "streamable-http") {
+        transport = v;
+      }
       i++;
     }
+
     if (process.argv[i] === "--port" && process.argv[i + 1]) {
       port = parseInt(process.argv[i + 1], 10);
       i++;
     }
   }
+
   return { transport, port };
 }
 
@@ -842,44 +849,55 @@ async function main(): Promise<void> {
     const transport = new StdioServerTransport();
     await server.connect(transport);
     console.error("Zotero MCP server running on stdio");
-  } else {
-    const { createServer } = await import("node:http");
-    const { SSEServerTransport } = await import(
-      "@modelcontextprotocol/sdk/server/sse.js"
-    );
-
-    const sessions = new Map<string, InstanceType<typeof SSEServerTransport>>();
-
-    const httpServer = createServer(async (req, res) => {
-      const url = new URL(req.url ?? "", `http://localhost:${args.port}`);
-
-      if (req.method === "GET" && url.pathname === "/sse") {
-        const transport = new SSEServerTransport("/messages", res);
-        sessions.set(transport.sessionId, transport);
-        transport.onclose = () => sessions.delete(transport.sessionId);
-        await server.connect(transport);
-        await transport.start();
-      } else if (req.method === "POST" && url.pathname === "/messages") {
-        const sessionId = url.searchParams.get("sessionId");
-        const transport = sessionId ? sessions.get(sessionId) : undefined;
-        if (!transport) {
-          res.writeHead(400, { "Content-Type": "text/plain" });
-          res.end("Invalid or missing sessionId");
-          return;
-        }
-        await transport.handlePostMessage(req, res);
-      } else {
-        res.writeHead(404, { "Content-Type": "text/plain" });
-        res.end("Not found");
-      }
-    });
-
-    httpServer.listen(args.port, () => {
-      console.error(
-        `Zotero MCP server running on SSE at http://localhost:${args.port}/sse`,
-      );
-    });
+    return;
   }
+
+  const { createServer } = await import("node:http");
+
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
+
+  await server.connect(transport);
+
+  const httpServer = createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", `http://localhost:${args.port}`);
+
+    if (req.method === "GET" && url.pathname === "/healthz") {
+      res.writeHead(200, {
+        "Content-Type": "text/plain",
+        "Cache-Control": "no-store",
+      });
+      res.end("OK");
+      return;
+    }
+
+    if (
+      url.pathname !== "/mcp" ||
+      !["GET", "POST", "DELETE"].includes(req.method ?? "")
+    ) {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("Not found");
+      return;
+    }
+
+    try {
+      await transport.handleRequest(req, res);
+    } catch (error) {
+      console.error("MCP request failed:", error);
+
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "text/plain" });
+        res.end("Internal server error")
+      }
+    }
+  });
+
+  httpServer.listen(args.port, "0.0.0.0", () => {
+    console.error(
+      `Zotero MCP Streamable HTTP listening on port ${args.port}`,
+    );
+  });
 }
 
 main().catch((error) => {
